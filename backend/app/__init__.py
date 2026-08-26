@@ -1,0 +1,1 @@
+# luciaGo backend application package
