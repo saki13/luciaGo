@@ -220,21 +220,58 @@ backend/app/tsumego.py
 
 ## 8. 验证与验收标准（**必须全部通过**）
 
-### 8.1 标准死活题用例（每个给"期望正解 + 期望活/死"）
+### 8.1 标准死活题用例（可直接落地，含 SGF + 期望断言）
 
-| # | 题型 | 期望 |
-|---|---|---|
-| 1 | 直三 黑先活 | 活；正解=中点（如 `F5`） |
-| 2 | 直三 白先杀 | 死；正解=中点或端点（视约定） |
-| 3 | 刀把五（bulky five）| 死（无论谁先） |
-| 4 | 板六（rectangular six）| 活（无外气断开时）；需按形状测 |
-| 5 | 两只独立真眼 | 活 |
-| 6 | 一眼被包围 | 死 |
-| 7 | **本题目：黑先杀白（SGF 见第 3 节）** | **死；正解=`S6`** |
-| 8 | 盘角曲四 / 劫 | 需标注"劫"或按规则处理（至少不给出错误确定结论） |
-| 9 | 似活似死(seki) | 需识别并标注（不误判为活/死） |
+> 说明：下面每题已由脚本构建并核对几何——**黑目标块被白墙包围、眼格留空**。棋盘 `SZ[9]`，`PL[B]`=黑先。坐标 `(row,col), row=0 顶`；SGF顶点=`char(97+col)+char(97+row)`。`targetVertex` 用目标块上任意一子即可（表格给代表性 GTP 坐标）。
 
-> 题库来源：可选用公开 SGF 死活题（如 tsumego hero / goproblems 子集，注意版权），每道标注答案做回归。
+**推荐：用脚本生成棋盘而非手写 SGF**（避免手写出错）。给一个可复用构建器（`sgfmill` 不需要，纯 grid 即可）：
+```python
+def outer_wall(black, size=9):
+    rs=[r for r,_ in black]; cs=[c for _,c in black]
+    r0,r1=min(rs)-1,max(rs)+1; c0,c1=min(cs)-1,max(cs)+1
+    return [(r,c) for r in range(r0,r1+1) for c in range(c0,c1+1)
+            if (r==r0 or r==r1 or c==c0 or c==c1) and 0<=r<size and 0<=c<size and (r,c) not in black]
+def to_sgf(black, size=9, pl='B'):
+    ab=[chr(97+c)+chr(97+r) for r,c in black]
+    aw=[chr(97+c)+chr(97+r) for r,c in outer_wall(black)]
+    return f"(;GM[1]FF[4]SZ[{size}]PL[{pl}]AB[{''.join(ab)}]AW[{''.join(aw)}])"
+```
+（把上面的 `black` 换成各题的黑块即可，`outer_wall` 自动加白墙。）
+
+#### 具体用例（SGF 已生成，可直接 POST 或写回归）
+
+```
+#1 直三·黑先活  眼格=(3,3)(4,3)(5,3) 正解=中点D5
+(;GM[1]FF[4]SZ[9]PL[B]AB[ccdceccdedceeecfefcgdgeg]AW[bbcbdbebfbbcfcbdfdbefebfffbgfgbhchdhehfh])
+#2 直三·白先杀  目标=同一黑块, 白移动
+(;GM[1]FF[4]SZ[9]PL[W]AB[ccdceccdedceeecfefcgdgeg]AW[bbcbdbebfbbcfcbdfdbefebfffbgfgbhchdhehfh])
+#3 刀把五(死型) 眼格=L形5目
+(;GM[1]FF[4]SZ[9]PL[B]AB[ccdcecfccdfdcefecfefff]AW[bbcbdbebfbgbbcgcbdgdbegebfgfbgcgdgegfggg])
+#4 板六(活形)  眼格=2x3
+(;GM[1]FF[4]SZ[9]PL[B]AB[ccdcecfccdcecfdfefff]AW[bbcbdbebfbgbbcgcbdgdbegebfgfbgcgdgegfggg])
+#5 两只独立真眼(活)  眼格=(3,3)(3,5)
+(;GM[1]FF[4]SZ[9]PL[B]AB[ccdcecfccdedcedeeefe]AW[bbcbdbebfbgbbcgcbdgdbegebfcfdfefffgf])
+#6 一眼被包围(死)  眼格=(3,3)
+(;GM[1]FF[4]SZ[9]PL[B]AB[ccdceccdedcedeee]AW[bbcbdbebfbbcfcbdfdbefebfcfdfefff])
+```
+
+`#1/#2` 的 `targetVertex`=黑块任一点（如 GTP `C7`，即 `(row2,col2)`）；`#3~#6` 同理用黑块一点。
+
+#### 期望断言（`POST /api/tsumego/solve`）
+
+| # | sideToMove | goal | 期望 status | 期望 bestMove | 备注 |
+|---|---|---|---|---|---|
+| 1 | `B` | `live` | `alive` | `D5` | 直三中点做两只眼 |
+| 2 | `W` | `kill` | `dead` | `D5`（或端点，多解） | 白占中点，黑做不出真眼 |
+| 3 | `B` | `live` | `dead` | （无正解/任意） | 刀把五本身死型，黑救不活 |
+| 4 | `B` | `live` | `alive` | `C4`/`D4`（中心断点） | 板六可活 |
+| 5 | `B` | `live` | `alive` | （无需走，已活） | 两只独立真眼 |
+| 6 | `W` | `kill` | `dead` | 填眼点 | 一眼被围，白可吃 |
+| 7 | `B` | `kill` | **`dead`** | **`S6`** | 第3节 SGF（19×19），必须给 S6 |
+
+> 题库可再扩充：**盘角曲四**（结果依赖劫材，应标注"劫/有条件"）、**普通劫**（标注"劫"）、**似活似死(seki)**（标注"seki"）。这三类**不得给出错误的确定活/死结论**；精确 SGF 建议从权威死活题集（如 tsumego hero 公开子集，注意版权）选取并标答案。
+
+> 提示：题库应**同时**测 `live` 与 `kill` 两个方向、以及 `sideToMove = B/W` 两分支，覆盖各种组合。
 
 ### 8.2 回归：现有简单题不能回退
 
