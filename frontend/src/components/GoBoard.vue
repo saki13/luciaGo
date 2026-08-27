@@ -97,7 +97,7 @@ function onClick(x: number, y: number) {
     <circle v-for="(h, i) in hoshi" :key="'h' + i" :cx="px(h.x)" :cy="py(h.y)" r="4" fill="#3a2a15" />
 
     <!-- ownership tint -->
-    <g v-if="ownership && ownership.length === size * size">
+    <g v-if="ownership && ownership.length === size * size" pointer-events="none">
       <rect
         v-for="i in size * size"
         :key="'o' + i"
@@ -136,7 +136,7 @@ function onClick(x: number, y: number) {
 
     <!-- markers -->
     <g v-for="m in markers || []" :key="m.x + '-' + m.y +
-      m.label">
+      m.label" pointer-events="none">
       <circle
         :cx="px(m.x)"
         :cy="py(m.y)"
@@ -161,6 +161,7 @@ function onClick(x: number, y: number) {
     <!-- problem region (tsumego) -->
     <rect
       v-if="regionRect"
+      pointer-events="none"
       :x="px(regionRect.x0) - CELL * 0.6"
       :y="py(regionRect.y0) - CELL * 0.6"
       :width="(regionRect.x1 - regionRect.x0) * CELL + CELL * 1.2"
@@ -174,6 +175,7 @@ function onClick(x: number, y: number) {
     <!-- target group highlight -->
     <circle
       v-if="targetXY"
+      pointer-events="none"
       :cx="px(targetXY.x)"
       :cy="py(targetXY.y)"
       :r="R + 3"
