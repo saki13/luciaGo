@@ -52,9 +52,11 @@ const regionRect = ref<Rect | null>(null)
 const selTarget = ref(false)
 const targetVertex = ref<string | null>(null)
 const tsumegoGoal = ref<'live' | 'kill'>('live')
+const tsumegoSide = ref<Color>('B')
 const tsumegoResult = ref<TsumegoResult | null>(null)
 const lastUserMove = ref<string | null>(null)
 const adjudicating = ref(false)
+const originalGrid = ref<Sign[][] | null>(null)
 
 function syncGrid() {
   const sm = board.signMap
@@ -157,10 +159,43 @@ function startTsumego() {
     return
   }
   regionRect.value = computeRegion(stones)
+  originalGrid.value = grid.map((r) => [...r])
   tsumego.value = true
   mode.value = 'play'
+  // 先手方 default to the colour of the side with fewer stones (the attacker/problem) —
+  // fall back to Black if tied. The user can change it.
+  let b = 0, w = 0
+  for (let y = 0; y < size.value; y++) for (let x = 0; x < size.value; x++) {
+    if (grid[y][x] === 1) b++
+    else if (grid[y][x] === -1) w++
+  }
+  tsumegoSide.value = b <= w ? 'B' : 'W'
+  toPlay.value = tsumegoSide.value === 'B' ? 1 : -1
   error.value = ''
-  runAnalyze(120)
+  tsumegoResult.value = null
+  lastUserMove.value = null
+}
+
+// Set who moves first (先手方) for the tsumego.
+function setSide(s: Color) {
+  tsumegoSide.value = s
+  toPlay.value = s === 'B' ? 1 : -1
+}
+
+function resetToOriginal() {
+  if (!originalGrid.value) return
+  const g = originalGrid.value
+  for (let y = 0; y < size.value; y++) for (let x = 0; x < size.value; x++) grid[y][x] = g[y]?.[x] ?? 0
+  board = new SabakiBoard(g.map((r) => [...r]))
+  captures.black = 0
+  captures.white = 0
+  history.length = 0
+  tsumegoResult.value = null
+  lastUserMove.value = null
+  targetVertex.value = null
+  toPlay.value = tsumegoSide.value === 'B' ? 1 : -1
+  analysis.value = null
+  error.value = ''
 }
 
 // ---- tsumego adjudication ----
@@ -170,7 +205,7 @@ function activateTargetMode() {
     return
   }
   selTarget.value = true
-  error.value = '点击棋盘上的一块棋子来选择目标群'
+  error.value = '点击目标棋块上的一块棋子'
 }
 
 function tsumegoPayload(attempt?: string) {
@@ -178,7 +213,7 @@ function tsumegoPayload(attempt?: string) {
     stones: stonesPayload(),
     region: currentRegion(),
     targetVertex: targetVertex.value!,
-    sideToMove: (toPlay.value === 1 ? 'B' : 'W') as Color,
+    sideToMove: tsumegoSide.value,
     goal: tsumegoGoal.value,
     attemptVertex: attempt,
     boardSize: size.value,
@@ -216,6 +251,53 @@ async function runVerify() {
   } finally {
     adjudicating.value = false
   }
+}
+
+// Play a solution line (the correct variation) onto the board, one move at a time.
+async function playLine(line: { color: Color; move: string }[]) {
+  loading.value = true
+  solving.value = true
+  error.value = ''
+  try {
+    for (const m of line) {
+      const [x, y] = gtpToV(m.move, size.value)
+      if (!isValidVertex([x, y], size.value)) break
+      if ((grid[y]?.[x] ?? 0) !== 0) break
+      const sign = m.color === 'B' ? 1 : -1
+      try {
+        board = board.makeMove(sign, [x, y], { preventSuicide: true, preventKo: true, preventOverwrite: true })
+      } catch {
+        break
+      }
+      syncGrid()
+      syncCaptures()
+      toPlay.value = m.color === 'B' ? -1 : 1
+      await new Promise((r) => setTimeout(r, 420))
+    }
+  } catch (e: any) {
+    error.value = e.message || String(e)
+  } finally {
+    loading.value = false
+    solving.value = false
+  }
+}
+
+// AI demonstrates the correct solution: reset to the original position, then play the line.
+async function aiPlay() {
+  if (!tsumego.value) {
+    error.value = '请先“开始死活题”'
+    return
+  }
+  if (!tsumegoResult.value?.line?.length) {
+    await adjudicateNow()
+  }
+  const line = tsumegoResult.value?.line
+  if (!line?.length) {
+    error.value = '未找到正解，无法演示'
+    return
+  }
+  resetToOriginal()
+  await playLine(line)
 }
 
 // ---- interaction ----
@@ -257,7 +339,6 @@ function onCellClick({ x, y }: { x: number; y: number }) {
     toPlay.value = sign === 1 ? -1 : 1
     lastUserMove.value = vToGtp(x, y, size.value)
     analysis.value = null
-    if (tsumego.value) runAnalyze(120) // instant feedback in tsumego
   } catch (e: any) {
     history.pop()
     error.value = e?.message || '禁着'
@@ -313,53 +394,17 @@ function playBestMove() {
   mode.value = 'play'
   onCellClick({ x, y })
 }
-
-// AI plays `steps` best moves (restricted to region) — the "solution line".
-async function aiPlay(steps: number) {
-  if (!tsumego.value) {
-    error.value = '请先“开始死活题”'
-    return
-  }
-  loading.value = true
-  solving.value = true
-  error.value = ''
-  try {
-    for (let i = 0; i < steps; i++) {
-      const toPlayColor: Color = toPlay.value === 1 ? 'B' : 'W'
-      const a = await analyze({
-        stones: stonesPayload(),
-        toPlay: toPlayColor,
-        boardSize: size.value,
-        maxVisits: 150,
-        includeOwnership: true,
-        region: currentRegion(),
-      })
-      const best = a.moveInfos?.[0]
-      if (!best) break
-      const [x, y] = gtpToV(best.move, size.value)
-      if (!isValidVertex([x, y], size.value)) break
-      if ((board.get([x, y]) || 0) !== 0) break
-      const sign = toPlay.value
-      try {
-        board = board.makeMove(sign, [x, y], { preventSuicide: true, preventKo: true, preventOverwrite: true })
-      } catch {
-        break
-      }
-      syncGrid()
-      syncCaptures()
-      toPlay.value = sign === 1 ? -1 : 1
-      analysis.value = a
-      await new Promise((r) => setTimeout(r, 320))
-    }
-  } catch (e: any) {
-    error.value = e.message || String(e)
-  } finally {
-    loading.value = false
-    solving.value = false
-  }
-}
-
 const markers = computed(() => {
+  // In tsumego mode, markers come from the adjudication solution, not global winrate.
+  if (tsumego.value && tsumegoResult.value?.line?.length) {
+    const res: { x: number; y: number; label: string; kind: 'best' | 'move' }[] = []
+    tsumegoResult.value.line.forEach((m, i) => {
+      const v = gtpToV(m.move, size.value)
+      if (!isValidVertex(v, size.value)) return
+      res.push({ x: v[0], y: v[1], label: i === 0 ? '正解' : String(i), kind: i === 0 ? 'best' : 'move' })
+    })
+    return res
+  }
   if (!analysis.value) return []
   const res: { x: number; y: number; label: string; kind: 'best' | 'move' }[] = []
   const top = analysis.value.moveInfos.slice(0, 5)
@@ -373,16 +418,38 @@ const markers = computed(() => {
 
 const rootInfo = computed(() => analysis.value?.rootInfo)
 const winratePct = computed(() => (rootInfo.value ? `${(rootInfo.value.winrate * 100).toFixed(1)}%` : '—'))
-const pvText = computed(() => {
-  const mi = analysis.value?.moveInfos?.[0]
-  if (!mi || !mi.pv || mi.pv.length === 0) return ''
-  return mi.pv.join(' → ')
-})
 
 const targetXY = computed(() => {
   if (!targetVertex.value || !tsumego.value) return null
   const v = gtpToV(targetVertex.value, size.value)
   return isValidVertex(v, size.value) ? { x: v[0], y: v[1] } : null
+})
+
+// Flood-fill the whole target group (connected same-colour stones) for highlighting.
+const targetGroup = computed<{ x: number; y: number }[] | null>(() => {
+  if (!targetVertex.value || !tsumego.value) return null
+  const start = gtpToV(targetVertex.value, size.value)
+  if (!isValidVertex(start, size.value)) return null
+  const colour = (grid[start[1]]?.[start[0]] ?? 0) as Sign
+  if (colour === 0) return null
+  const n = size.value
+  const seen = new Set<number>()
+  const stack: [number, number][] = [start]
+  const out: { x: number; y: number }[] = []
+  while (stack.length) {
+    const [x, y] = stack.pop()!
+    const k = y * n + x
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push({ x, y })
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const nx = x + dx, ny = y + dy
+      if (nx >= 0 && nx < n && ny >= 0 && ny < n && (grid[ny]?.[nx] ?? 0) === colour && !seen.has(ny * n + nx)) {
+        stack.push([nx, ny])
+      }
+    }
+  }
+  return out
 })
 </script>
 
@@ -409,29 +476,32 @@ const targetXY = computed(() => {
           <h2>死活题</h2>
           <button class="primary" @click="startTsumego">开始死活题</button>
           <div v-if="tsumego" class="row">
-            <button @click="runAnalyze(200)" :disabled="loading">提示</button>
-            <button @click="aiPlay(1)" :disabled="loading || solving">AI走一手</button>
-            <button @click="aiPlay(8)" :disabled="loading || solving">演示解法</button>
+            <button @click="aiPlay()" :disabled="loading || solving">演示解法</button>
+            <button @click="resetToOriginal" :disabled="!originalGrid">重置到原题</button>
           </div>
           <p class="tip" v-if="tsumego">
-            红框 = 题目区域；AI 会只在区域内落子。你也可在「对局」模式自行尝试。
+            红框 = 题目区域。先选目标群→判定看正解；「演示解法」从原题走出正确变化；「重置到原题」回到开始。
           </p>
         </section>
 
         <section :class="{ ts: tsumego }" v-if="tsumego">
           <h2>死活判定</h2>
           <div class="row">
+            <span>先手：</span>
+            <button :class="{ active: tsumegoSide === 'B' }" @click="setSide('B')">黑先</button>
+            <button :class="{ active: tsumegoSide === 'W' }" @click="setSide('W')">白先</button>
+            <span>目标：</span>
             <button :class="{ active: tsumegoGoal === 'live' }" @click="tsumegoGoal = 'live'">活</button>
             <button :class="{ active: tsumegoGoal === 'kill' }" @click="tsumegoGoal = 'kill'">杀</button>
+          </div>
+          <div class="row">
             <button :class="{ active: selTarget }" @click="activateTargetMode">
               {{ targetVertex ? '目标已选' : '选目标群' }}
             </button>
-          </div>
-          <div class="row">
             <button class="primary" @click="adjudicateNow" :disabled="adjudicating">
               {{ adjudicating ? '判定中…' : '判定' }}
             </button>
-            <button @click="runVerify" :disabled="adjudicating">验证我这手</button>
+            <button @click="runVerify" :disabled="adjudicating">验证</button>
           </div>
           <div v-if="tsumegoResult" class="adjud">
             <div class="badge" :class="tsumegoResult.status">
@@ -442,9 +512,6 @@ const targetXY = computed(() => {
               <span :class="tsumegoResult.achieved ? 'ok' : 'no'">
                 {{ tsumegoResult.achieved ? '达成' : '未达成' }}
               </span>
-            </div>
-            <div v-if="tsumegoResult.line && tsumegoResult.line.length" class="adjud-variation">
-              {{ tsumegoResult.line.map(m => (m.color === 'B' ? '黑' : '白') + m.move).join('，') }}
             </div>
           </div>
         </section>
@@ -489,12 +556,25 @@ const targetXY = computed(() => {
           :ownership="showOwnership ? analysis?.ownership ?? null : null"
           :region-rect="tsumego ? regionRect : null"
           :target-xy="targetXY"
+          :target-group="targetGroup"
           @cell-click="onCellClick"
         />
       </main>
 
       <aside class="side">
-        <section>
+        <section v-if="tsumego">
+          <h2>解法主线</h2>
+          <div v-if="tsumegoResult?.line?.length" class="pv">
+            <div class="pv-best">
+              正解：<b>{{ tsumegoResult.bestMove }}</b>
+              <span class="wr">{{ tsumegoResult.status === 'alive' ? '活' : '死' }}</span>
+            </div>
+            <div class="pv-line">{{ tsumegoResult.line.map(m => (m.color === 'B' ? '黑' : '白') + '·' + m.move).join('  ') }}</div>
+          </div>
+          <div v-else class="empty">先选目标群 → 判定</div>
+        </section>
+
+        <section v-if="!tsumego">
           <h2>推荐着法</h2>
           <div v-if="!rootInfo" class="empty">摆盘后点击分析</div>
           <ul v-else class="moves">
@@ -506,18 +586,6 @@ const targetXY = computed(() => {
             </li>
           </ul>
           <p v-if="rootInfo" class="hint">点击第一条＝落最佳着。</p>
-        </section>
-
-        <section v-if="tsumego">
-          <h2>解法主线 (PV)</h2>
-          <div v-if="analysis?.moveInfos?.[0]" class="pv">
-            <div class="pv-best">
-              正解：{{ analysis.moveInfos[0].move }}
-              <span class="wr">{{ (analysis.moveInfos[0].winrate * 100).toFixed(1) }}%</span>
-            </div>
-            <div v-if="pvText" class="pv-line">{{ pvText }}</div>
-          </div>
-          <div v-else class="empty">点「提示」查看正解</div>
         </section>
       </aside>
     </div>

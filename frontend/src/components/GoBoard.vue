@@ -16,6 +16,7 @@ const props = defineProps<{
   ownership?: number[] | null
   regionRect?: { x0: number; y0: number; x1: number; y1: number } | null
   targetXY?: { x: number; y: number } | null
+  targetGroup?: { x: number; y: number }[] | null
 }>()
 
 const emit = defineEmits<{
@@ -172,9 +173,22 @@ function onClick(x: number, y: number) {
       stroke-dasharray="6 4"
     />
 
-    <!-- target group highlight -->
+    <!-- target group highlight (whole group) -->
+    <g v-if="targetGroup && targetGroup.length" pointer-events="none">
+      <circle
+        v-for="(p, i) in targetGroup"
+        :key="'tg' + i"
+        :cx="px(p.x)"
+        :cy="py(p.y)"
+        :r="R + 3"
+        fill="none"
+        stroke="#e74c3c"
+        stroke-width="3"
+        stroke-opacity="0.95"
+      />
+    </g>
     <circle
-      v-if="targetXY"
+      v-else-if="targetXY"
       pointer-events="none"
       :cx="px(targetXY.x)"
       :cy="py(targetXY.y)"
