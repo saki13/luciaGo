@@ -27,3 +27,6 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# Smargo (research, not used)
+backend/engine/smargo/
