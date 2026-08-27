@@ -163,8 +163,8 @@ class Tsumego:
         *,
         first_move: Optional[str] = None,
         visits: int = 300,
-        max_plies: int = 16,
-        candidate_limit: int = 6,
+        max_plies: int = 10,
+        candidate_limit: int = 10,
     ) -> dict:
         """Adjudicate the target group and find the true vital point(s).
 
@@ -203,13 +203,36 @@ class Tsumego:
                 "line": r["line"],
             }
 
-        # Find the vital point by scanning candidates (KataGo's top region moves).
+        # Vital-point candidates = KataGo's top region moves UNION empty points adjacent
+        # to the target group (so the real vital point isn't missed if it's outside top-N).
         cand_res = await self._engine_best(board, side_to_move, region, visits)
-        candidates = [
+        ordered = [
             m.get("move")
-            for m in (cand_res.get("moveInfos") or [])[:candidate_limit]
+            for m in (cand_res.get("moveInfos") or [])
             if m.get("move")
         ]
+        # group-adjacent empty points
+        adj: list[str] = []
+        for (r, c) in group:
+            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < self.size and 0 <= nc < self.size and board.get(nr, nc) is None:
+                    v = self.gtp(nr, nc)
+                    if v not in adj and (not region or v in region):
+                        adj.append(v)
+        candidates: list[str] = []
+        for v in ordered + adj:
+            if v and v not in candidates:
+                candidates.append(v)
+            if len(candidates) >= candidate_limit:
+                break
+        # ensure at least a few group-adjacent candidates are tried even if KataGo's list
+        # was exhausted first (helps find the vital point).
+        for v in adj:
+            if v not in candidates:
+                candidates.append(v)
+            if len(candidates) >= candidate_limit + 4:
+                break
         winning: list[tuple[str, str, list]] = []
         saw_states: dict[str, str] = {}
         for mv in candidates:
@@ -257,6 +280,84 @@ class Tsumego:
             "line": [],
         }
 
+    def _is_defender(self, colour: str, side: str) -> bool:
+        """colour is the group owner ('b'/'w'), side is 'B'/'W'."""
+        return colour == side.lower()
+
+    def _score_for_side(self, board, group, colour: str, side: str) -> float:
+        """How good is the resulting position for `side` w.r.t. the group's fate.
+        Defender wants the group to stay alive (2 eyes); attacker wants it dead."""
+        status = self.classify(board, group, colour)
+        eyes = len(self._eye_regions(board, group, colour))
+        captured = not self._exists(board, group)
+        is_defender = self._is_defender(colour, side)
+        if captured:
+            # group is gone: great for attacker, terrible for defender.
+            return 1000 if not is_defender else -1000
+        if is_defender:
+            base = 100 if status == "alive" else (0 if status == "dead" else 45)
+            if captured:
+                base -= 200
+            return base + eyes * 5
+        else:
+            base = 100 if status == "dead" else (0 if status == "alive" else 45)
+            if captured:
+                base += 150
+            return base + (10 - eyes) * 5
+
+    async def _region_candidates(
+        self, board, side: str, region: list[str], visits: int, limit: int = 6
+    ) -> list[str]:
+        res = await self._engine_best(board, side, region, visits)
+        moves: list[str] = []
+        for m in (res.get("moveInfos") or [])[:limit]:
+            mv = m.get("move")
+            if not mv or mv.startswith(("pass", "resign")):
+                continue
+            try:
+                pr, pc = self.parse(mv)
+            except (ValueError, IndexError):
+                continue
+            if 0 <= pr < self.size and 0 <= pc < self.size and board.get(pr, pc) is None:
+                moves.append(mv)
+        return moves
+
+    async def _fight(
+        self, board, region: list[str], group, colour: str, next_side: str, visits: int, max_plies: int
+    ):
+        """Goal-directed local fight: each side plays the move that best serves its
+        life/death goal (defender makes eyes, attacker kills). Greedy, but far more
+        life/death-aware than using KataGo's global-winrate best move."""
+        side = next_side
+        line: list[dict] = []
+        status = "unknown"
+        for _ in range(max_plies):
+            moves = await self._region_candidates(board, side, region, visits, limit=6)
+            chosen = None
+            best_score = None
+            for mv in moves:
+                pr, pc = self.parse(mv)
+                b2 = board.copy()
+                if not self._play(b2, side, pr, pc):
+                    continue
+                score = self._score_for_side(b2, group, colour, side)
+                if best_score is None or score > best_score:
+                    best_score = score
+                    chosen = mv
+            if not chosen:
+                break
+            pr, pc = self.parse(chosen)
+            if not self._play(board, side, pr, pc):
+                break
+            line.append({"color": side, "move": chosen})
+            side = "W" if side == "B" else "B"
+            status = self.classify(board, group, colour)
+            if status in ("alive", "dead"):
+                break
+        if status == "unknown":
+            status = self.classify(board, group, colour)
+        return status, line
+
     async def _resolve_after(
         self,
         board,
@@ -268,31 +369,13 @@ class Tsumego:
         visits: int,
         max_plies: int,
     ):
-        """Play move_to_play for player, then run the local fight and classify."""
+        """Play move_to_play for player, then run a goal-directed local fight."""
         b = board.copy()
         pr, pc = self.parse(move_to_play)
         if not self._play(b, player, pr, pc):
             return {"status": "unknown", "line": []}
         line = [{"color": player, "move": move_to_play}]
-        side = "W" if player == "B" else "B"
-        status = "unknown"
-        for _ in range(max_plies):
-            res = await self._engine_best(b, side, region, visits)
-            best = (res.get("moveInfos") or [{}])[0].get("move")
-            if not best or best.startswith(("pass", "resign")):
-                break
-            br, bc = self.parse(best)
-            if not (0 <= br < self.size and 0 <= bc < self.size):
-                break
-            if b.get(br, bc) is not None:
-                break
-            if not self._play(b, side, br, bc):
-                break
-            line.append({"color": side, "move": best})
-            side = "W" if side == "B" else "B"
-            status = self.classify(b, group, colour)
-            if status in ("alive", "dead"):
-                break
-        if status == "unknown":
-            status = self.classify(b, group, colour)
+        next_side = "W" if player == "B" else "B"
+        status, fline = await self._fight(b, region, group, colour, next_side, visits, max_plies)
+        line += fline
         return {"status": status, "line": line}

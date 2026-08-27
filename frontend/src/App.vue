@@ -42,12 +42,17 @@ function currentSgf(): string {
   return `(;GM[1]FF[4]SZ[${size.value}]AB[${black.join('')}]AW[${white.join('')}])`
 }
 async function copySgf() {
+  const sgf = currentSgf()
+  sgfText.value = sgf
   try {
-    await navigator.clipboard.writeText(currentSgf())
+    await navigator.clipboard.writeText(sgf)
     error.value = '已复制局面(SGF)到剪贴板'
   } catch {
-    error.value = '复制失败，请手动复制'
+    error.value = '自动复制不可用，已在下方面框显示，请手动全选复制'
   }
+}
+function selectSgf(e: Event) {
+  ;(e.target as HTMLTextAreaElement).select()
 }
 interface Rect { x0: number; y0: number; x1: number; y1: number }
 
@@ -67,6 +72,7 @@ const solving = ref(false)
 const error = ref('')
 const showOwnership = ref(false)
 const serverUp = ref<boolean | null>(null)
+const sgfText = ref('')
 
 // ---- tsumego state ----
 const tsumego = ref(false)
@@ -557,6 +563,7 @@ const targetGroup = computed<{ x: number; y: number }[] | null>(() => {
           <div class="row">
             <button @click="copySgf">复制局面(SGF)</button>
           </div>
+          <textarea v-if="sgfText" class="sgf" @click="selectSgf" readonly>{{ sgfText }}</textarea>
           <div class="caps"><span>提子：黑 {{ captures.black }}</span><span>白 {{ captures.white }}</span></div>
         </section>
 
@@ -640,6 +647,17 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .board-wrap > :deep(svg) { width: min(86vh, 100%); }
 .tip { font-size: 12px; color: #888; margin: 0; }
 .caps { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: #555; }
+.sgf {
+  width: 100%;
+  margin-top: 6px;
+  font-family: monospace;
+  font-size: 11px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  padding: 6px;
+  resize: vertical;
+  background: #fafafa;
+}
 .err { color: #c0392b; font-size: 12px; }
 .result { display: flex; gap: 10px; margin-top: 12px; }
 .kpi { flex: 1; text-align: center; background: #f4f4f4; border-radius: 8px; padding: 8px 4px; }
