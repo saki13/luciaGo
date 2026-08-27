@@ -25,6 +25,30 @@ function isValidVertex(v: [number, number], size: number): boolean {
 function makeGrid(n: number): Sign[][] {
   return Array.from({ length: n }, () => Array(n).fill(0))
 }
+
+function vToSgf(x: number, y: number): string {
+  return String.fromCharCode(97 + x) + String.fromCharCode(97 + y)
+}
+function currentSgf(): string {
+  const black: string[] = []
+  const white: string[] = []
+  for (let y = 0; y < size.value; y++) {
+    for (let x = 0; x < size.value; x++) {
+      const s = grid[y][x]
+      if (s === 1) black.push(vToSgf(x, y))
+      else if (s === -1) white.push(vToSgf(x, y))
+    }
+  }
+  return `(;GM[1]FF[4]SZ[${size.value}]AB[${black.join('')}]AW[${white.join('')}])`
+}
+async function copySgf() {
+  try {
+    await navigator.clipboard.writeText(currentSgf())
+    error.value = '已复制局面(SGF)到剪贴板'
+  } catch {
+    error.value = '复制失败，请手动复制'
+  }
+}
 interface Rect { x0: number; y0: number; x1: number; y1: number }
 
 // ---- board state ----
@@ -529,6 +553,9 @@ const targetGroup = computed<{ x: number; y: number }[] | null>(() => {
           <div class="row">
             <button @click="undo" :disabled="history.length === 0">撤销</button>
             <button @click="resetBoard">清空</button>
+          </div>
+          <div class="row">
+            <button @click="copySgf">复制局面(SGF)</button>
           </div>
           <div class="caps"><span>提子：黑 {{ captures.black }}</span><span>白 {{ captures.white }}</span></div>
         </section>
