@@ -2,7 +2,8 @@
 import { computed, reactive, ref } from 'vue'
 import GoBoard from './components/GoBoard.vue'
 import SabakiBoard from '@sabaki/go-board'
-import { analyze, health } from './api'
+import { analyze, health, solveTsumego, evaluateTsumego } from './api'
+import type { TsumegoResult } from './api'
 import type { AnalyzeResult, Color, Sign } from './types'
 
 const LETTERS = 'ABCDEFGHJKLMNOPQRST'
@@ -47,6 +48,14 @@ const serverUp = ref<boolean | null>(null)
 const tsumego = ref(false)
 const regionRect = ref<Rect | null>(null)
 
+// ---- tsumego adjudication state ----
+const selTarget = ref(false)
+const targetVertex = ref<string | null>(null)
+const tsumegoGoal = ref<'live' | 'kill'>('live')
+const tsumegoResult = ref<TsumegoResult | null>(null)
+const lastUserMove = ref<string | null>(null)
+const adjudicating = ref(false)
+
 function syncGrid() {
   const sm = board.signMap
   for (let y = 0; y < size.value; y++) {
@@ -69,6 +78,10 @@ function resetBoard() {
   error.value = ''
   regionRect.value = null
   tsumego.value = false
+  targetVertex.value = null
+  tsumegoResult.value = null
+  selTarget.value = false
+  lastUserMove.value = null
 }
 function changeSize(n: number) {
   size.value = n
@@ -83,6 +96,10 @@ function changeSize(n: number) {
   error.value = ''
   regionRect.value = null
   tsumego.value = false
+  targetVertex.value = null
+  tsumegoResult.value = null
+  selTarget.value = false
+  lastUserMove.value = null
 }
 function pushHistory() {
   history.push({ grid: grid.map((r) => [...r]), black: captures.black, white: captures.white })
@@ -146,9 +163,75 @@ function startTsumego() {
   runAnalyze(120)
 }
 
+// ---- tsumego adjudication ----
+function activateTargetMode() {
+  if (!tsumego.value) {
+    error.value = '请先“开始死活题”'
+    return
+  }
+  selTarget.value = true
+  error.value = '点击棋盘上的一块棋子来选择目标群'
+}
+
+function tsumegoPayload(attempt?: string) {
+  return {
+    stones: stonesPayload(),
+    region: currentRegion(),
+    targetVertex: targetVertex.value!,
+    sideToMove: (toPlay.value === 1 ? 'B' : 'W') as Color,
+    goal: tsumegoGoal.value,
+    attemptVertex: attempt,
+    boardSize: size.value,
+    maxVisits: 300,
+  }
+}
+
+async function adjudicateNow() {
+  if (!targetVertex.value) {
+    error.value = '请先选择目标群'
+    return
+  }
+  adjudicating.value = true
+  error.value = ''
+  try {
+    tsumegoResult.value = await solveTsumego(tsumegoPayload())
+  } catch (e: any) {
+    error.value = e.message || String(e)
+  } finally {
+    adjudicating.value = false
+  }
+}
+
+async function runVerify() {
+  if (!targetVertex.value || !lastUserMove.value) {
+    error.value = '请先选择目标群，再落一手'
+    return
+  }
+  adjudicating.value = true
+  error.value = ''
+  try {
+    tsumegoResult.value = await evaluateTsumego(tsumegoPayload(lastUserMove.value))
+  } catch (e: any) {
+    error.value = e.message || String(e)
+  } finally {
+    adjudicating.value = false
+  }
+}
+
 // ---- interaction ----
 function onCellClick({ x, y }: { x: number; y: number }) {
   error.value = ''
+
+  // Target-selection mode: clicking a stone picks the target group.
+  if (selTarget.value) {
+    if ((grid[y]?.[x] ?? 0) !== 0) {
+      targetVertex.value = vToGtp(x, y, size.value)
+      selTarget.value = false
+      adjudicateNow()
+    }
+    return
+  }
+
   if (mode.value === 'edit') {
     pushHistory()
     const cur = board.get([x, y]) || 0
@@ -172,6 +255,7 @@ function onCellClick({ x, y }: { x: number; y: number }) {
     syncGrid()
     syncCaptures()
     toPlay.value = sign === 1 ? -1 : 1
+    lastUserMove.value = vToGtp(x, y, size.value)
     analysis.value = null
     if (tsumego.value) runAnalyze(120) // instant feedback in tsumego
   } catch (e: any) {
@@ -294,6 +378,12 @@ const pvText = computed(() => {
   if (!mi || !mi.pv || mi.pv.length === 0) return ''
   return mi.pv.join(' → ')
 })
+
+const targetXY = computed(() => {
+  if (!targetVertex.value || !tsumego.value) return null
+  const v = gtpToV(targetVertex.value, size.value)
+  return isValidVertex(v, size.value) ? { x: v[0], y: v[1] } : null
+})
 </script>
 
 <template>
@@ -326,6 +416,37 @@ const pvText = computed(() => {
           <p class="tip" v-if="tsumego">
             红框 = 题目区域；AI 会只在区域内落子。你也可在「对局」模式自行尝试。
           </p>
+        </section>
+
+        <section :class="{ ts: tsumego }" v-if="tsumego">
+          <h2>死活判定</h2>
+          <div class="row">
+            <button :class="{ active: tsumegoGoal === 'live' }" @click="tsumegoGoal = 'live'">活</button>
+            <button :class="{ active: tsumegoGoal === 'kill' }" @click="tsumegoGoal = 'kill'">杀</button>
+            <button :class="{ active: selTarget }" @click="activateTargetMode">
+              {{ targetVertex ? '目标已选' : '选目标群' }}
+            </button>
+          </div>
+          <div class="row">
+            <button class="primary" @click="adjudicateNow" :disabled="adjudicating">
+              {{ adjudicating ? '判定中…' : '判定' }}
+            </button>
+            <button @click="runVerify" :disabled="adjudicating">验证我这手</button>
+          </div>
+          <div v-if="tsumegoResult" class="adjud">
+            <div class="badge" :class="tsumegoResult.status">
+              目标群：{{ tsumegoResult.status === 'alive' ? '活' : '死' }}
+            </div>
+            <div class="adjud-line" v-if="tsumegoResult.bestMove">
+              正解：<b>{{ tsumegoResult.bestMove }}</b>
+              <span :class="tsumegoResult.achieved ? 'ok' : 'no'">
+                {{ tsumegoResult.achieved ? '达成' : '未达成' }}
+              </span>
+            </div>
+            <div v-if="tsumegoResult.line && tsumegoResult.line.length" class="adjud-variation">
+              {{ tsumegoResult.line.map(m => (m.color === 'B' ? '黑' : '白') + m.move).join('，') }}
+            </div>
+          </div>
         </section>
 
         <section>
@@ -367,6 +488,7 @@ const pvText = computed(() => {
           :markers="markers"
           :ownership="showOwnership ? analysis?.ownership ?? null : null"
           :region-rect="tsumego ? regionRect : null"
+          :target-xy="targetXY"
           @cell-click="onCellClick"
         />
       </main>
@@ -441,4 +563,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .pv-best { font-weight: 700; display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .pv-best .wr { font-weight: 600; color: #2f5d1a; }
 .pv-line { color: #555; line-height: 1.5; word-break: break-all; }
+.adjud { margin-top: 10px; }
+.badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 13px;
+  color: #fff;
+}
+.badge.alive { background: #2e9e4f; }
+.badge.dead { background: #c0392b; }
+.adjud-line { margin-top: 8px; font-size: 14px; }
+.adjud-line .ok { color: #2e9e4f; font-weight: 700; margin-left: 6px; }
+.adjud-line .no { color: #c0392b; font-weight: 700; margin-left: 6px; }
+.adjud-variation { margin-top: 6px; color: #555; font-size: 12px; line-height: 1.5; }
 </style>

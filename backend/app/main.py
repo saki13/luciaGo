@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .katago import KataGoEngine
+from .tsumego import Tsumego
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -43,6 +44,8 @@ engine = KataGoEngine(
     default_visits=int(os.environ.get("MAX_VISITS", "300")),
     cwd=str(BACKEND_DIR),
 )
+
+tsumego = Tsumego(engine, size=BOARD_SIZE, komi=KOMI, rules=RULES)
 
 
 @asynccontextmanager
@@ -167,3 +170,53 @@ async def analyze(req: AnalyzeRequest):
 @app.get("/")
 async def root():
     return {"app": "luciaGo", "status": "ok", "docs": "/docs"}
+
+
+class TsumegoRequest(BaseModel):
+    stones: list[list[str]] = Field(default_factory=list)
+    region: list[str] = Field(default_factory=list)
+    targetVertex: str
+    sideToMove: Literal["B", "W"] = "B"
+    goal: Literal["live", "kill"] = "live"
+    attemptVertex: str | None = None
+    boardSize: int | None = None
+    maxVisits: int | None = Field(default=None, ge=1)
+
+
+@app.post("/api/tsumego/solve")
+async def tsumego_solve(req: TsumegoRequest):
+    if not engine.running:
+        raise HTTPException(status_code=503, detail="KataGo engine is not running")
+    res = await tsumego.solve(
+        req.stones,
+        req.region,
+        req.targetVertex,
+        req.sideToMove,
+        goal=req.goal,
+        visits=req.maxVisits or 400,
+    )
+    if "error" in res:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+@app.post("/api/tsumego/evaluate")
+async def tsumego_evaluate(req: TsumegoRequest):
+    if not engine.running:
+        raise HTTPException(status_code=503, detail="KataGo engine is not running")
+    if not req.attemptVertex:
+        raise HTTPException(status_code=400, detail="attemptVertex is required")
+    res = await tsumego.solve(
+        req.stones,
+        req.region,
+        req.targetVertex,
+        req.sideToMove,
+        goal=req.goal,
+        first_move=req.attemptVertex,
+        visits=req.maxVisits or 300,
+    )
+    if "error" in res:
+        raise HTTPException(status_code=400, detail=res["error"])
+    res["attempt"] = req.attemptVertex
+    return res
+

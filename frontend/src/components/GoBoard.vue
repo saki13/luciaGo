@@ -15,6 +15,7 @@ const props = defineProps<{
   markers?: Marker[]
   ownership?: number[] | null
   regionRect?: { x0: number; y0: number; x1: number; y1: number } | null
+  targetXY?: { x: number; y: number } | null
 }>()
 
 const emit = defineEmits<{
@@ -168,6 +169,18 @@ function onClick(x: number, y: number) {
       stroke="rgba(220, 40, 90, 0.55)"
       stroke-width="2"
       stroke-dasharray="6 4"
+    />
+
+    <!-- target group highlight -->
+    <circle
+      v-if="targetXY"
+      :cx="px(targetXY.x)"
+      :cy="py(targetXY.y)"
+      :r="R + 3"
+      fill="none"
+      stroke="#e74c3c"
+      stroke-width="3"
+      stroke-opacity="0.9"
     />
 
     <!-- coordinate labels -->
