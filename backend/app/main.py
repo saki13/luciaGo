@@ -81,6 +81,9 @@ class AnalyzeRequest(BaseModel):
     rules: str | None = None
     maxVisits: int | None = Field(default=None, ge=1)
     includeOwnership: bool = True
+    # Optional region (GTP vertices) to constrain the side-to-move when solving
+    # life-and-death problems (KataGo allowMoves), preventing it from tenuki.
+    region: list[str] = Field(default_factory=list)
 
     @staticmethod
     def _check_pairs(pairs: list[list[str]]):
@@ -130,12 +133,20 @@ async def analyze(req: AnalyzeRequest):
         kwargs["initial_stones"] = req.stones
         kwargs["initial_player"] = req.toPlay
 
+    extra: dict = {}
+    if req.region:
+        # Constrain the side to move to the problem region (prevents tenuki).
+        extra["allowMoves"] = [
+            {"player": req.toPlay, "moves": req.region, "untilDepth": 1000}
+        ]
+
     result = await engine.analyze(
         board_size=req.boardSize,
         komi=req.komi,
         rules=req.rules,
         max_visits=req.maxVisits,
         include_ownership=req.includeOwnership,
+        extra=extra,
         **kwargs,
     )
 

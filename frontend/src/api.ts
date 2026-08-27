@@ -7,6 +7,7 @@ export interface AnalyzePayload {
   maxVisits?: number
   komi?: number
   includeOwnership?: boolean
+  region?: string[]
 }
 
 export async function analyze(payload: AnalyzePayload): Promise<AnalyzeResult> {

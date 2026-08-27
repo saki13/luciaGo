@@ -14,6 +14,7 @@ const props = defineProps<{
   signMap: Sign[][]
   markers?: Marker[]
   ownership?: number[] | null
+  regionRect?: { x0: number; y0: number; x1: number; y1: number } | null
 }>()
 
 const emit = defineEmits<{
@@ -155,6 +156,19 @@ function onClick(x: number, y: number) {
         {{ m.label }}
       </text>
     </g>
+
+    <!-- problem region (tsumego) -->
+    <rect
+      v-if="regionRect"
+      :x="px(regionRect.x0) - CELL * 0.6"
+      :y="py(regionRect.y0) - CELL * 0.6"
+      :width="(regionRect.x1 - regionRect.x0) * CELL + CELL * 1.2"
+      :height="(regionRect.y1 - regionRect.y0) * CELL + CELL * 1.2"
+      fill="rgba(255, 80, 120, 0.10)"
+      stroke="rgba(220, 40, 90, 0.55)"
+      stroke-width="2"
+      stroke-dasharray="6 4"
+    />
 
     <!-- coordinate labels -->
     <g font-size="10" fill="#6b4d1c">
